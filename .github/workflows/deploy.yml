@@ -1,0 +1,160 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+  BACKEND_CONTAINER_NAME: full-stack-backend
+  BACKEND_PORT: "8080"
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Build backend
+        run: npm test
+        working-directory: backend
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm test
+        working-directory: frontend
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+  deploy-frontend:
+    name: Deploy frontend to S3
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync frontend to S3
+        run: aws s3 sync frontend/dist "s3://${{ secrets.FRONTEND_BUCKET_NAME }}" --delete
+
+      - name: Invalidate CloudFront cache
+        if: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID != '' }}
+        run: aws cloudfront create-invalidation --distribution-id "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}" --paths "/*"
+
+  deploy-backend:
+    name: Deploy backend to EC2
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" backend
+          docker tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+      - name: Deploy backend over SSH with rollback
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+          BACKEND_CONTAINER_NAME: ${{ env.BACKEND_CONTAINER_NAME }}
+          BACKEND_PORT: ${{ env.BACKEND_PORT }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          envs: AWS_REGION,ECR_REGISTRY,ECR_REPOSITORY,IMAGE_TAG,BACKEND_CONTAINER_NAME,BACKEND_PORT
+          script: |
+            set -e
+            IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+            PREVIOUS_IMAGE=$(docker inspect "$BACKEND_CONTAINER_NAME" --format='{{.Config.Image}}' 2>/dev/null || true)
+
+            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            docker pull "$IMAGE"
+
+            docker rm -f "${BACKEND_CONTAINER_NAME}-previous" 2>/dev/null || true
+            if docker inspect "$BACKEND_CONTAINER_NAME" >/dev/null 2>&1; then
+              docker rename "$BACKEND_CONTAINER_NAME" "${BACKEND_CONTAINER_NAME}-previous"
+            fi
+
+            docker run -d --restart unless-stopped --name "$BACKEND_CONTAINER_NAME" -p "$BACKEND_PORT:$BACKEND_PORT" \
+              --log-driver=awslogs \
+              --log-opt awslogs-region="$AWS_REGION" \
+              --log-opt awslogs-group="/full-stack-app/backend" \
+              --log-opt awslogs-stream="backend-deploy" \
+              -e PORT="$BACKEND_PORT" \
+              -e DB_HOST="$(aws ssm get-parameter --name /full-stack-app/db/host --region "$AWS_REGION" --query Parameter.Value --output text)" \
+              -e DB_NAME="$(aws ssm get-parameter --name /full-stack-app/db/name --region "$AWS_REGION" --query Parameter.Value --output text)" \
+              -e DB_USER="$(aws ssm get-parameter --name /full-stack-app/db/user --region "$AWS_REGION" --query Parameter.Value --output text)" \
+              -e DB_PASSWORD="$(aws ssm get-parameter --name /full-stack-app/db/password --with-decryption --region "$AWS_REGION" --query Parameter.Value --output text)" \
+              -e DB_PORT=5432 \
+              "$IMAGE"
+
+            sleep 10
+            if ! curl -fsS "http://localhost:$BACKEND_PORT/api/health"; then
+              docker logs "$BACKEND_CONTAINER_NAME" || true
+              docker rm -f "$BACKEND_CONTAINER_NAME" || true
+              if [ -n "$PREVIOUS_IMAGE" ]; then
+                docker rename "${BACKEND_CONTAINER_NAME}-previous" "$BACKEND_CONTAINER_NAME"
+                docker start "$BACKEND_CONTAINER_NAME"
+              fi
+              exit 1
+            fi
+
+            docker rm -f "${BACKEND_CONTAINER_NAME}-previous" 2>/dev/null || true

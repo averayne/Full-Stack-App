@@ -2,6 +2,15 @@
 
 Full-stack React and Node.js application with a TypeScript Express API.
 
+## Project Components
+
+- React frontend in `frontend/`
+- Node.js backend API in `backend/`
+- Dockerfiles for frontend and backend containers
+- Pulumi AWS infrastructure in `infra/`
+- GitHub Actions CI/CD workflow in `.github/workflows/deploy.yml`
+- Deployment guide in `docs/deployment.md`
+
 ## Local Setup
 
 Install dependencies:
@@ -37,3 +46,21 @@ Copy `backend/.env.example` to `backend/.env` when connecting to PostgreSQL.
 Without database settings, the API returns local sample data so the app still runs.
 
 Copy `frontend/.env.example` to `frontend/.env` to point the frontend at a deployed API.
+
+## Docker
+
+Build the backend image:
+
+```bash
+docker build -t full-stack-backend ./backend
+```
+
+Build the frontend image:
+
+```bash
+docker build -t full-stack-frontend ./frontend
+```
+
+## Deployment
+
+See `docs/deployment.md` for the full Pulumi, AWS, GitHub Actions, security, monitoring, and video submission checklist.

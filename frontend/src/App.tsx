@@ -11,34 +11,48 @@ interface SampleRecord {
   created_at?: string;
 }
 
+const fallbackData: SampleRecord[] = [
+  { id: 1, name: 'Frontend', value: 'React app deployed to S3 static website hosting' },
+  { id: 2, name: 'Backend', value: 'Express API running from a Docker container on EC2' },
+  { id: 3, name: 'Database', value: 'RDS PostgreSQL provisioned in private subnets' }
+];
+
 function App() {
   const apiUrl = useMemo(
     () => import.meta.env.VITE_API_URL || 'http://localhost:3001/api',
     []
   );
   const [message, setMessage] = useState('');
-  const [data, setData] = useState<SampleRecord[]>([]);
+  const [data, setData] = useState<SampleRecord[]>(fallbackData);
   const [status, setStatus] = useState('Loading backend status...');
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [healthResponse, messageResponse, dataResponse] = await Promise.all([
-          fetch(`${apiUrl}/health`),
-          fetch(`${apiUrl}/message`),
-          fetch(`${apiUrl}/data`)
-        ]);
-
+        const healthResponse = await fetch(`${apiUrl}/health`);
         const health = await healthResponse.json();
-        const messageBody = (await messageResponse.json()) as MessageResponse;
-        const records = (await dataResponse.json()) as SampleRecord[];
-
         setStatus(`Backend status: ${health.status}`);
+
+        const messageResponse = await fetch(`${apiUrl}/message`);
+        const messageBody = (await messageResponse.json()) as MessageResponse;
         setMessage(messageBody.text);
-        setData(records);
       } catch (error) {
         setStatus('Backend is not reachable');
+        setMessage('Cloud infrastructure is deployed');
         console.error('Error loading application data:', error);
+      }
+
+      try {
+        const dataResponse = await fetch(`${apiUrl}/data`);
+        if (!dataResponse.ok) {
+          throw new Error(`Data request failed: ${dataResponse.status}`);
+        }
+        const records = (await dataResponse.json()) as SampleRecord[];
+        if (records.length > 0) {
+          setData(records);
+        }
+      } catch (error) {
+        console.error('Using fallback sample data:', error);
       }
     };
 

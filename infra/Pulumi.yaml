@@ -1,0 +1,3 @@
+name: full-stack-cloud-app
+runtime: nodejs
+description: Pulumi infrastructure for a React, Node.js, and RDS cloud-native application.

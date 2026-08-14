@@ -1,0 +1,10 @@
+config:
+  aws:region: us-east-1
+  full-stack-cloud-app:allowedSshCidr: 0.0.0.0/0
+  full-stack-cloud-app:frontendAllowedOrigin: "*"
+  full-stack-cloud-app:dbName: appdb
+  full-stack-cloud-app:dbUsername: appuser
+  full-stack-cloud-app:dbPassword:
+    secure: replace-with-pulumi-secret
+  full-stack-cloud-app:keyPairPublicKey: ssh-rsa replace-with-your-public-key
+  full-stack-cloud-app:backendImage: replace-after-github-action-build

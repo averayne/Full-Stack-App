@@ -18,6 +18,20 @@ coverage/
 **/.env.*
 !**/.env.example
 
+# Local deployment credentials and generated keys
+*key
+*key.pub
+*.pem
+*.ppk
+id_rsa
+id_rsa.pub
+
+# Pulumi local/state files
+.pulumi/
+Pulumi.*.yaml
+!Pulumi.yaml
+!Pulumi.*.yaml.example
+
 # Logs
 *.log
 npm-debug.log*
